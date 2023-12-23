@@ -1,16 +1,5 @@
 #include "parser.h"
-#include <iostream>
-#include <unistd.h>
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <string.h>
-#include <sys/wait.h>
-#define  concat(a,b) (a"" b)
-#define CGROUP_MEM "/sys/fs/cgroup/cntr/memory.max"
-#define CGROUP_CPU "/sys/fs/cgroup/cntr/cpu.max"
-#define CGROUP_SUBTREE "/sys/fs/cgroup/cgroup.subtree_control"
-#define REQ_CGROUP "/sys/fs/cgroup/cntr"
-using namespace std;
+#include "header.h"
 
 
 int isOK(int status,const char* msg){
@@ -21,41 +10,60 @@ int isOK(int status,const char* msg){
     return status;
 }
 
+
 void WRITE(const char* path,const char* value){
     int fd = open(path,O_WRONLY | O_APPEND);
     if(fd == -1){
-        cout<<"Error in opening\n";
+        std::cout<<"Error in opening\n";
         exit(1);
     }
     ssize_t bytes = write(fd,value,strlen(value));
     if(bytes==-1){
-        cout<<"error in writing\n";
+        std::cout<<"error in writing\n";
         exit(1);
     }
     close(fd);
 
 }
+
+//custom run function for the shell
+int run(const char* name){
+    char* _args[] = {(char*) name, (char*)0};
+    return execvp(name, _args);
+}
+
+
 char* stack_mem(){
     const int stacksize = 65*1024;
     auto *stack = new (nothrow) char[stacksize];
     if(stack==nullptr){
-        cout<<"Can't allocate memory";
+        std::cout<<"Can't allocate memory";
         exit(EXIT_FAILURE);
     }
     return stack+stacksize;
 }
+
+
 void cloneProcess(int (*function)(void*),int flags){
     auto pid= clone(function,stack_mem(),flags,0);
     isOK(pid,"Clone Process Error");
     wait(nullptr);
-
 }
+
+
 void setupENV(){
     clearenv();
     setenv("TERM","xterm-256color",0);
     setenv("PATH","/bin/:/sbin/:/usr/sbin",0);
 }
-void setupChild(){
+
+
+void setupRoot(const char* folder){
+    isOK(chroot(folder),"cant't set root: ");
+    isOK(chdir("/"),"chdir: ");
+}
+
+void setupJail(){
     map<string,string> c=parse("container_config.ini");
     const char* root = c["custom_root"].c_str();
     const char* cpuManage = c["cpu_manage"].c_str();
@@ -68,32 +76,51 @@ void setupChild(){
 
     isOK(sethostname(hostname,strlen(hostname)),"hostname error");
     setupENV();
-
-
-
-
-
+    setupRoot("./root");
 
 }
-int childProcess(void *args){
-    setupChild();
-    return 0;
+
+
+int jail(void *args){
+    setupJail();
+
+    //attach the procfs to our main fail hierarchy
+    mount("proc","/proc","proc",0,0);
+
+    pid_t shellPid = fork();
+    isOK(shellPid,"can't create fork: ");
+    if(shellPid == 0)
+    {
+        run("/bin/bash");
+        exit(0);
+    }
+
+    //wait till all child processes are finished
+    while(wait(nullptr)>0);
+
+    //unmount the procfs when all processes are finished
+    umount("proc");
+
+    return EXIT_SUCCESS;
 }
+
+
 void makeCgroup(){
     WRITE(CGROUP_SUBTREE,"+cpu +memory +pids");
     mkdir(REQ_CGROUP,S_IRUSR | S_IWUSR);
     const char* pid = to_string(getpid()).c_str();
-    // cout<<pid;
+    std::cout<<"Child Pid: "<<pid<<std::endl;
     WRITE(concat(REQ_CGROUP,"/cgroup.procs"),pid);
-
 }
+
+
 int main(){
-    cout<<"Parent Pid :"<<getpid()<<endl;
+    std::cout<<"Parent Pid :"<<getpid()<<endl;
+
     makeCgroup();
-    cloneProcess()
     
+    cloneProcess(jail,CLONE_NEWPID | CLONE_NEWUTS| SIGCHLD);
 
+    return EXIT_SUCCESS;
 
-    
-    
 }
